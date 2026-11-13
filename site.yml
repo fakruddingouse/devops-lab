@@ -2,46 +2,96 @@
 - name: Provision the tradelive VM
   hosts: tradelive
   become: yes
-  become_method: sudo
 
   vars_files:
     - vars/secrets.yml
 
   tasks:
-
-    - name: Install libpam-pwquality
-      package:
+    - name: Install password quality package
+      apt:
         name: libpam-pwquality
         state: present
+        update_cache: yes
 
-    - name: Enforce a strong password policy
+    - name: Enforce strong password policy
       lineinfile:
-        path: /etc/pam.d/common-password
-        regexp: pam_pwquality.so
-        state: present
-        line: >-
-          password required pam_pwquality.so minlen=12
-          lcredit=-1 ucredit=-1 dcredit=-1 ocredit=-1 retry=3
+        path: /etc/security/pwquality.conf
+        regexp: '^#?minlen'
+        line: 'minlen = 12'
 
-    - name: Ensure group developers exists
+    - name: Ensure developers group exists
       group:
         name: developers
         state: present
 
-    - name: Create the user trader
+    - name: Create trader user
       user:
         name: trader
+        group: developers
         shell: /bin/bash
+        create_home: yes
+
+    - name: Set trader password
+      user:
+        name: trader
         password: "{{ trader_hash }}"
 
-    - name: Assign trader to the developers group
-      user:
-        name: trader
-        groups: developers
-        append: yes
-
-    - name: Install my public key for trader
+    - name: Install trader SSH public key
       authorized_key:
         user: trader
+        key: "{{ trader_ssh_public_key }}"
         state: present
-        key: "{{ lookup('file', lookup('env','HOME') + '/.ssh/id_ed25519.pub') }}"
+
+    # Experiment 7 - Two Factor Authentication
+
+    - name: Install the Google Authenticator PAM module
+      apt:
+        name: libpam-google-authenticator
+        update_cache: yes
+        state: present
+
+    - name: Tell PAM to use Google Authenticator for SSH
+      lineinfile:
+        path: /etc/pam.d/sshd
+        line: "auth required pam_google_authenticator.so nullok"
+        state: present
+      notify: Restart SSH
+
+    - name: Turn off PAM password logins for SSH
+      lineinfile:
+        path: /etc/pam.d/sshd
+        regexp: '^@include common-auth'
+        line: "#@include common-auth"
+      notify: Restart SSH
+
+    - name: Allow keyboard-interactive logins
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?KbdInteractiveAuthentication'
+        line: "KbdInteractiveAuthentication yes"
+      notify: Restart SSH
+
+    - name: Require key AND code for trader only
+      blockinfile:
+        path: /etc/ssh/sshd_config
+        marker: "# {mark} TRADER 2FA"
+        block: |
+          Match User trader
+            AuthenticationMethods publickey,keyboard-interactive
+      notify: Restart SSH
+
+    - name: Configure limited sudo access for trader
+      copy:
+        dest: /etc/sudoers.d/trader-limited
+        content: |
+          trader ALL=(root) NOPASSWD: /usr/bin/systemctl status ssh, /usr/bin/systemctl restart ssh, /usr/bin/apt update
+        owner: root
+        group: root
+        mode: '0440'
+        validate: '/usr/sbin/visudo -cf %s'
+
+  handlers:
+    - name: Restart SSH
+      service:
+        name: ssh
+        state: restarted
