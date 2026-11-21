@@ -6,7 +6,7 @@
   tasks:
     - name: Install Flask and Gunicorn
       apt:
-      name:
+        name:
           - python3-flask
           - gunicorn
         update_cache: yes
